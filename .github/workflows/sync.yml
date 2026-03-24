@@ -1,8 +1,8 @@
-name: Sync Blood Pressure
+name: Omramin Daily Sync
 
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,34 +10,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install omramin
-        run: pip install "git+https://github.com/bugficks/omramin.git"
-
-      - name: Configure omramin
-        env:
-          GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          OMRON_USERNAME: ${{ secrets.OMRON_USERNAME }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          # Создаём конфиг через init с передачей паролей через stdin
-          # Предполагаем, что omramin init умеет читать из stdin
-          # Если нет – используем команды login
-          echo "Starting omramin init..."
-          echo "$GARMIN_USERNAME" | omramin garmin login --username "$GARMIN_USERNAME" --password "$GARMIN_PASSWORD"
-          echo "$OMRON_USERNAME" | omramin omron login --username "$OMRON_USERNAME" --password "$OMRON_PASSWORD"
-          # Если устройство не добавлено автоматически, добавим его вручную
-          # omramin add --category BPM --macaddr "MAC_ADDRESS"   # замените на реальный MAC
-          # Но лучше, чтобы устройство уже было в аккаунте Omron
+          pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Sync today's measurements
-        run: omramin sync --days 1
-        env:
-          # Можно также передать пароли через env, если omramin их поддерживает
-          OMRAMIN_KEYRING_BACKEND: file   # используем файловое хранилище токенов, чтобы не зависеть от системной связки ключей
+      - name: Create Config
+        run: |
+          mkdir -p ~/.config/omramin/
+          cat <<EOF > ~/.config/omramin/config.json
+          {
+            "garmin": {
+              "email": "${{ secrets.GARMIN_EMAIL }}",
+              "password": "${{ secrets.GARMIN_PASSWORD }}"
+            },
+            "omron": {
+              "email": "${{ secrets.OMRON_EMAIL }}",
+              "password": "${{ secrets.OMRON_PASSWORD }}",
+              "region": "EU"
+            },
+            "devices": [],
+            "tokens": {}
+          }
+          EOF
+
+      - name: Run Sync
+        run: omramin --debug sync --days 7
