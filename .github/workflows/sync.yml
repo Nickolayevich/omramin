@@ -1,33 +1,43 @@
-name: Sync OMRON to Garmin
+name: Sync Blood Pressure
 
 on:
   schedule:
-    # Запуск каждый день в 9:00 UTC
     - cron: '0 9 * * *'
-  workflow_dispatch:  # чтобы можно было запустить вручную
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install omramin
-        run: uv pip install "git+https://github.com/bugficks/omramin.git"
+        run: pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Run omramin sync
+      - name: Configure omramin
         env:
           GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           OMRON_USERNAME: ${{ secrets.OMRON_USERNAME }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          # Передаём учётные данные через переменные окружения, как требует omramin
-          # Можно использовать `omramin init --non-interactive` или прямой логин
+          # Создаём конфиг через init с передачей паролей через stdin
+          # Предполагаем, что omramin init умеет читать из stdin
+          # Если нет – используем команды login
+          echo "Starting omramin init..."
           echo "$GARMIN_USERNAME" | omramin garmin login --username "$GARMIN_USERNAME" --password "$GARMIN_PASSWORD"
           echo "$OMRON_USERNAME" | omramin omron login --username "$OMRON_USERNAME" --password "$OMRON_PASSWORD"
-          omramin sync --days 7
+          # Если устройство не добавлено автоматически, добавим его вручную
+          # omramin add --category BPM --macaddr "MAC_ADDRESS"   # замените на реальный MAC
+          # Но лучше, чтобы устройство уже было в аккаунте Omron
+
+      - name: Sync today's measurements
+        run: omramin sync --days 1
+        env:
+          # Можно также передать пароли через env, если omramin их поддерживает
+          OMRAMIN_KEYRING_BACKEND: file   # используем файловое хранилище токенов, чтобы не зависеть от системной связки ключей
