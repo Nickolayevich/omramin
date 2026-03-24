@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -20,24 +20,20 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Create Config
+      - name: Configure omramin (non‑interactive)
+        env:
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          mkdir -p ~/.config/omramin/
-          cat <<EOF > ~/.config/omramin/config.json
-          {
-            "garmin": {
-              "email": "${{ secrets.GARMIN_EMAIL }}",
-              "password": "${{ secrets.GARMIN_PASSWORD }}"
-            },
-            "omron": {
-              "email": "${{ secrets.OMRON_EMAIL }}",
-              "password": "${{ secrets.OMRON_PASSWORD }}",
-              "region": "NA"
-            },
-            "devices": [],
-            "tokens": {}
-          }
-          EOF
+          # Передаём логин/пароль Garmin и Omron в интерактивный мастер init
+          printf "%s\n%s\n%s\n%s\n" \
+            "$GARMIN_EMAIL" \
+            "$GARMIN_PASSWORD" \
+            "$OMRON_EMAIL" \
+            "$OMRON_PASSWORD" \
+            | omramin init
 
-      - name: Run Sync
-        run: omramin --debug sync --days 7
+      - name: Run sync (last 7 days)
+        run: omramin sync --days 7
