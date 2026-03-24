@@ -1,43 +1,33 @@
-name: Omramin Daily Sync
+name: Sync OMRON to Garmin
 
 on:
   schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
+    # Запуск каждый день в 9:00 UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:  # чтобы можно было запустить вручную
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
 
       - name: Install omramin
-        run: |
-          pip install "git+https://github.com/bugficks/omramin.git"
+        run: uv pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Create Config
+      - name: Run omramin sync
+        env:
+          GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          OMRON_USERNAME: ${{ secrets.OMRON_USERNAME }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          mkdir -p ~/.config/omramin/
-          cat <<EOF > ~/.config/omramin/config.json
-          {
-            "garmin": {
-              "email": "${{ secrets.GARMIN_EMAIL }}",
-              "password": "${{ secrets.GARMIN_PASSWORD }}"
-            },
-            "omron": {
-              "email": "${{ secrets.OMRON_EMAIL }}",
-              "password": "${{ secrets.OMRON_PASSWORD }}",
-              "region": "EU"
-            },
-            "devices": [],
-            "tokens": {}
-          }
-          EOF
-
-      - name: Run Sync
-        run: omramin --debug sync --from 2025-12-01 --to 2026-03-24
+          # Передаём учётные данные через переменные окружения, как требует omramin
+          # Можно использовать `omramin init --non-interactive` или прямой логин
+          echo "$GARMIN_USERNAME" | omramin garmin login --username "$GARMIN_USERNAME" --password "$GARMIN_PASSWORD"
+          echo "$OMRON_USERNAME" | omramin omron login --username "$OMRON_USERNAME" --password "$OMRON_PASSWORD"
+          omramin sync --days 1
