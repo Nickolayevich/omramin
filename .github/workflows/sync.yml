@@ -40,4 +40,4 @@ jobs:
           EOF
 
       - name: Run Sync
-        run: omramin --debug sync --days 7
+        run: omramin --debug sync --from 2025-12-01 --to 2026-03-24
