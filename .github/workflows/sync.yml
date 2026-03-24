@@ -30,4 +30,4 @@ jobs:
           # Можно использовать `omramin init --non-interactive` или прямой логин
           echo "$GARMIN_USERNAME" | omramin garmin login --username "$GARMIN_USERNAME" --password "$GARMIN_PASSWORD"
           echo "$OMRON_USERNAME" | omramin omron login --username "$OMRON_USERNAME" --password "$OMRON_PASSWORD"
-          omramin sync --days 1
+          omramin sync --days 7
