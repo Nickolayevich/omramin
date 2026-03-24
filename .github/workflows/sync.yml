@@ -2,31 +2,42 @@ name: Omramin Daily Sync
 
 on:
   schedule:
-    - cron: '0 6 * * *' # Запуск каждый день в 06:00 UTC (9:00 МСК)
-  workflow_dispatch: # Позволяет запускать вручную кнопкой
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          
+
       - name: Install omramin
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
-          
-      - name: Run Sync
-        env:
-          # Программа должна уметь подхватывать эти переменные
-          OMRAMIN_GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          OMRAMIN_GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          OMRAMIN_OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRAMIN_OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+
+      - name: Create Config
         run: |
-          # Сначала авторизуемся (если скрипт поддерживает переменные окружения)
-          # Или используем команду sync напрямую с параметрами
-          omramin sync --days 3
+          mkdir -p ~/.config/omramin/
+          cat <<EOF > ~/.config/omramin/config.json
+          {
+            "garmin": {
+              "email": "${{ secrets.GARMIN_EMAIL }}",
+              "password": "${{ secrets.GARMIN_PASSWORD }}"
+            },
+            "omron": {
+              "email": "${{ secrets.OMRON_EMAIL }}",
+              "password": "${{ secrets.OMRON_PASSWORD }}",
+              "region": "EU"
+            },
+            "devices": [],
+            "tokens": {}
+          }
+          EOF
+
+      - name: Run Sync
+        run: omramin --debug sync --days 7
