@@ -32,7 +32,7 @@ jobs:
             "omron": {
               "email": "${{ secrets.OMRON_EMAIL }}",
               "password": "${{ secrets.OMRON_PASSWORD }}",
-              "region": "ALRU"
+              "region": "EU"
             },
             "devices": [],
             "tokens": {}
