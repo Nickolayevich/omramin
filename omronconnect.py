@@ -12,7 +12,7 @@ import zlib
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, fields
 from decimal import Decimal
-from typing import get_type_hints
+from functools import cache
 
 import httpx
 import pytz
@@ -201,7 +201,7 @@ class DeviceCategory(enum.StrEnum):
 
 
 def _coerce_dataclass_fields(self) -> None:
-    type_hints = get_type_hints(type(self))
+    type_hints = T.get_type_hints(type(self))
     for field in fields(self):
         attr = getattr(self, field.name)
         field_type = type_hints[field.name]
@@ -316,14 +316,18 @@ def convert_data_util(value: int, scale: int, _type: T.Callable[[Decimal], T.Any
 class OmronDevice:
     name: str
     macaddr: str
-    category: DeviceCategory
+    category: T.Optional[DeviceCategory] = None
     user: int = 1
     enabled: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.category, DeviceCategory):
             try:
-                object.__setattr__(self, "category", DeviceCategory.__members__[self.category.upper()])
+                if self.category:
+                    object.__setattr__(self, "category", DeviceCategory.__members__[self.category.upper()])
+
+                else:
+                    object.__setattr__(self, "enabled", False)
 
             except KeyError as exc:
                 object.__setattr__(self, "enabled", False)
@@ -335,7 +339,9 @@ class OmronDevice:
 
     def to_dict(self) -> dict:
         result = asdict(self)
-        result["category"] = self.category.name
+        if self.category:
+            result["category"] = self.category.name
+
         return result
 
 
@@ -386,8 +392,8 @@ class OmronConnect(ABC):
 
 
 class OmronConnect1(OmronConnect):
-    _OGSC_APP_VERSION = "010.003.00001"
-    _OGSC_SDK_VERSION = "000.101"
+    _OGSC_APP_VERSION = "011.004.00000"
+    _OGSC_SDK_VERSION = "000.005"
 
     _USER_AGENT = f"OmronConnect/{_OGSC_APP_VERSION}.001 CFNetwork/1335.0.3.4 Darwin/21.6.0)"
 
@@ -510,18 +516,23 @@ class OmronConnect1(OmronConnect):
                         for dev in model.get("deviceSerialIDList", []):
                             try:
                                 key = f"{dev['deviceSerialID']}:{dev['userNumberInDevice']}"
+                                # ignore devices with userNumberInDevice = 0
+                                # 0: is device it self, not a user profile
+                                if f"{dev.get('userNumberInDevice')}" == "0":
+                                    continue
+
                                 devices.setdefault(
                                     key,
                                     {
-                                        "deviceCategory": cat["deviceCategory"],
+                                        "deviceCategory": cat.get("deviceCategory"),
                                         "deviceModel": model["deviceModel"],
                                         "deviceSerialID": dev["deviceSerialID"],
                                         "userNumberInDevice": dev["userNumberInDevice"],
                                     },
                                 )
 
-                            except KeyError:
-                                L.debug("Skipping device with missing required fields")
+                            except KeyError as e:
+                                L.debug(f"Skipping device with missing required fields: {e}")
                                 continue
 
             return devices
@@ -529,12 +540,26 @@ class OmronConnect1(OmronConnect):
         devices = unique_devices(syncList)
         result: list[OmronDevice] = []
         for device in devices.values():
-            try:
-                category = DeviceCategory(device["deviceCategory"])
+            category = None
+            deviceCategory = device.get("deviceCategory")
+            categoryFromAPI = deviceCategory is not None and deviceCategory != ""
 
-            except (ValueError, KeyError):
-                L.debug(f"Skipping device with unsupported category: {device.get('deviceModel', 'unknown')}")
-                continue
+            # If API didn't provide category, try inference
+            if not categoryFromAPI:
+                deviceCategory = omron_model_to_device_category(device.get("deviceModel"))
+
+            if deviceCategory is not None and deviceCategory != "":
+                try:
+                    category = DeviceCategory(str(deviceCategory))
+
+                except ValueError:
+                    L.debug(
+                        f"Skipping device with unsupported category '{deviceCategory}': {device.get('deviceModel')}"
+                    )
+                    continue
+
+            else:
+                L.warning(f"Device with unknown category {device.get('deviceModel')}")
 
             ocDev = OmronDevice(
                 category=category,
@@ -558,7 +583,7 @@ class OmronConnect1(OmronConnect):
             "userNumberInDevice": int(device.user),
             "searchDateFrom": searchDateFrom if searchDateFrom >= 0 else 0,
             "searchDateTo": int(U.utcnow().timestamp() * 1000) if searchDateTo <= 0 else searchDateTo,
-            # "deviceModel": "OSG",
+            # "deviceModel": "OGSC", "HBF-xxx", ...
         }
 
         r = self._client.post(
@@ -582,6 +607,7 @@ class OmronConnect1(OmronConnect):
             return []
 
         if _debugSaveResponse:
+            assert device.category is not None, "Device category must be set for get_measurements"
             fname = f".debug/{data['searchDateTo']}_{device.category.name}_{device.serial}_{device.user}.json"
             U.json_save(fname, returnedValue)
 
@@ -811,13 +837,25 @@ class OmronConnect2(OmronConnect):
                 L.debug(f"Skipping device without MAC address: {attrs.get('name', 'unknown')}")
                 continue
 
-            try:
-                deviceCategory = attrs["deviceCategory"]
-                category = DeviceCategory(str(deviceCategory))
+            category = None
+            deviceCategory = attrs.get("deviceCategory")
+            categoryFromAPI = deviceCategory is not None and deviceCategory != ""
 
-            except (ValueError, KeyError):
-                L.debug(f"Skipping device with unsupported category: {attrs.get('name', 'unknown')}")
-                continue
+            # If API didn't provide category, try inference
+            if not categoryFromAPI:
+                deviceModel = attrs.get("deviceModel", attrs.get("identifier"))
+                deviceCategory = omron_model_to_device_category(deviceModel)
+
+            if deviceCategory is not None and deviceCategory != "":
+                try:
+                    category = DeviceCategory(str(deviceCategory))
+
+                except ValueError:
+                    L.debug(f"Skipping device with unsupported category '{deviceCategory}': {attrs.get('name')}")
+                    continue
+
+            else:
+                L.warning(f"Device with unknown category {device.get('deviceModel')}")
 
             # Create OmronDevice
             deviceModel = attrs.get("deviceModel", attrs.get("identifier", "Unknown"))
@@ -1047,3 +1085,22 @@ class OmronClient:
 
 
 ########################################################################################################################
+
+
+@cache
+def omron_model_to_device_category(model: str) -> T.Optional[DeviceCategory]:
+    if not model:
+        return None
+
+    RX = {
+        re.compile(r"^(HEM-|X[0-9]+ Smart)", re.IGNORECASE): DeviceCategory.BPM,
+        re.compile(r"^(HBF-|Body Composition Monitor)|(VIVA$)", re.IGNORECASE): DeviceCategory.SCALE,
+    }
+
+    for pattern, cat in RX.items():
+        if pattern.search(model):
+            L.debug(f"Device {model} matched pattern {pattern.pattern} -> {cat.name}")
+            return cat
+
+    L.debug(f"Device {model} does not match any known patterns")
+    return None

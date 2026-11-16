@@ -3,8 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "click>=8.1.7",
-#   "garminconnect>=0.2.25",
-#   "garth>=0.5.21; python_version>='3.14'",
+#   "garminconnect>=0.3.0",
 #   "httpx[http2,cli,brotli]>=0.28.1",
 #   "inquirer>=3.4.0",
 #   "json5>=0.10.0",
@@ -13,6 +12,7 @@
 #   "python-dateutil>=2.9.0.post0",
 #   "pytz>=2025.1",
 #   "click-pwsh>=0.9.5; sys_platform == 'win32'",
+#   "selectolax>=0.4.6",
 # ]
 # ///
 ########################################################################################################################
@@ -37,7 +37,6 @@ from functools import cache, wraps
 
 import click
 import garminconnect as GC
-import garth
 import inquirer
 import keyring
 from dateutil import parser as dateutil_parser
@@ -58,7 +57,7 @@ except ImportError:
 
 ########################################################################################################################
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 ########################################################################################################################
 
@@ -277,7 +276,6 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
     def get_mfa() -> str:
         return inquirer.text(message="> Enter MFA/2FA code")
 
-    logged_in = False
     try:
         # Load tokens from keyring (requires email)
         tokendata = None
@@ -291,14 +289,10 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
         gc = GC.Garmin(email=email, is_cn=is_cn, prompt_mfa=get_mfa)
 
         L.debug(f"Attempting Garmin login using cached tokens for {email}")
-        logged_in = gc.login(tokendata)
-        if not logged_in:
-            L.debug("Garmin cached tokens invalid, attempting password login")
-            raise FileNotFoundError
-
+        gc.login(tokenstore=tokendata)
         L.debug(f"Garmin login successful using cached tokens for {email}")
 
-    except (FileNotFoundError, binascii.Error, KeyError):
+    except (FileNotFoundError, binascii.Error, KeyError, GC.GarminConnectAuthenticationError):
         # Precedence: env > config > prompt
         password = _E("GARMIN_PASSWORD")
         is_cn_str = _E("GARMIN_IS_CN") or str(gcCfg.get("is_cn", "false"))
@@ -330,9 +324,9 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
 
         gc = GC.Garmin(email=email, password=password, is_cn=is_cn, prompt_mfa=get_mfa)
         try:
-            logged_in = gc.login()
+            gc.login()
 
-        except Exception as login_error:  # pylint: disable=broad-except
+        except GC.GarminConnectAuthenticationError as login_error:
             L.error(f"Login failed: {login_error}")
             L.info("Please re-enter your credentials")
 
@@ -358,36 +352,35 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
 
             # Retry login with new credentials
             gc = GC.Garmin(email=email, password=password, is_cn=is_cn, prompt_mfa=get_mfa)
-            logged_in = gc.login()
+            try:
+                gc.login()
 
-        if logged_in:
-            # Save credentials to config (if not from env vars)
-            config_changed = False
-            if not _E("GARMIN_EMAIL"):
-                gcCfg["email"] = email
-                config_changed = True
+            except GC.GarminConnectAuthenticationError as e:
+                raise LoginError(f"Login failed: {e}") from e
 
-            if not _E("GARMIN_IS_CN"):
-                gcCfg["is_cn"] = is_cn
-                config_changed = True
+        # Save credentials to config (if not from env vars)
+        config_changed = False
+        if not _E("GARMIN_EMAIL"):
+            gcCfg["email"] = email
+            config_changed = True
 
-            if config_changed:
-                try:
-                    config["garmin"] = gcCfg
-                    U.json_save(config_path, config)
+        if not _E("GARMIN_IS_CN"):
+            gcCfg["is_cn"] = is_cn
+            config_changed = True
 
-                except (OSError, IOError, ValueError) as e:
-                    L.warning(f"Failed to save config: {e}")
+        if config_changed:
+            try:
+                config["garmin"] = gcCfg
+                U.json_save(config_path, config)
 
-            # Save tokens to keyring
-            save_service_tokens(config_path, "garmin", email, gc.garth.dumps())
+            except (OSError, IOError, ValueError) as e:
+                L.warning(f"Failed to save config: {e}")
 
-    except garth.exc.GarthHTTPError:
+        # Save tokens to keyring
+        save_service_tokens(config_path, "garmin", email, gc.client.dumps())  # pylint: disable=no-member
+
+    except (GC.GarminConnectTooManyRequestsError, GC.GarminConnectConnectionError):
         L.error("Failed to login to Garmin Connect", exc_info=True)
-        return None
-
-    if not logged_in:
-        L.error("Failed to login to Garmin Connect")
         return None
 
     L.info("Logged in to Garmin Connect")
@@ -1137,7 +1130,13 @@ def omron_sync_device_to_garmin(
     startdateStr = datetime.fromtimestamp(startLocal).date().isoformat()
     enddateStr = datetime.fromtimestamp(endLocal).date().isoformat()
 
-    L.info(f"Start synchronizing device '{ocDev.name}' from {startdateStr} to {enddateStr}")
+    if startdateStr == enddateStr:
+        L.info(f"Start synchronizing device '{ocDev.name}' for {startdateStr}")
+
+    else:
+        L.info(f"Start synchronizing device '{ocDev.name}' from {startdateStr} to {enddateStr}")
+
+    assert ocDev.category is not None, "Device category must be set for sync"
     L.debug(
         f"Device details: MAC={ocDev.macaddr}, Serial={ocDev.serial}, User={ocDev.user}, Category={ocDev.category.name}"
     )
@@ -1532,14 +1531,13 @@ def _get_platform_config_path() -> pathlib.Path:
 
         return pathlib.Path.home() / "AppData" / "Roaming" / CONFIG_DIR_NAME / CONFIG_FILENAME
 
-    elif system == "Darwin":
+    if system == "Darwin":
         return pathlib.Path.home() / "Library" / "Application Support" / CONFIG_DIR_NAME / CONFIG_FILENAME
 
-    else:
-        return _get_xdg_config_path()
+    return _get_xdg_config_path()
 
 
-def _get_default_config_path() -> pathlib.Path:
+def _get_default_config_path() -> pathlib.Path:  # pylint: disable=too-many-return-statements
     """Get default config path with precedence:
 
     1. OMRAMIN_CONFIG env var (if set)
@@ -2415,7 +2413,7 @@ def omron_list_devices_cmd(ctx: click.Context, days: int, fetch_all: bool) -> No
 
         for device in devices:
             click.echo(f"Device: {device.name}")
-            click.echo(f"  Category:    {device.category.name}")
+            click.echo(f"  Category:    {device.category.name if device.category else 'Unknown'}")
             click.echo(f"  MAC Address: {device.macaddr}")
             click.echo(f"  User Number: {device.user}")
             click.echo()
@@ -2592,6 +2590,7 @@ def export_csv(
         for ocDev, measurements in exportdata.values():
             for m in measurements:
                 dt = datetime.fromtimestamp(m.measurementDate / 1000, tz=m.timeZone)
+                assert ocDev.category is not None, "Device category must be set for export"
                 row = {
                     "timestamp": dt.isoformat(),
                     "deviceName": ocDev.name,
@@ -2616,6 +2615,7 @@ def export_json(
     for ocDev, measurements in exportdata.values():
         for m in measurements:
             dt = datetime.fromtimestamp(m.measurementDate / 1000, tz=m.timeZone)
+            assert ocDev.category is not None, "Device category must be set for export"
             entry = {
                 "timestamp": dt.isoformat(),
                 "deviceName": ocDev.name,
@@ -2818,6 +2818,25 @@ def init_cmd(
                     else:
                         L.info(f"Found {len(apiDevices)} device(s) from API")
 
+                        # Prompt for unknown device categories
+                        for d in apiDevices:
+                            if not d.category:
+                                questions = [
+                                    inquirer.List(
+                                        "category",
+                                        message=f"Device '{d.name}' has unknown category. What type is it?",
+                                        choices=list(OC.DeviceCategory.__members__.keys()),
+                                    )
+                                ]
+                                answers = inquirer.prompt(questions)
+                                if not answers:
+                                    L.warning(f"Skipping device '{d.name}' - no category selected")
+
+                                else:
+                                    object.__setattr__(d, "category", OC.DeviceCategory[answers["category"]])
+                                    object.__setattr__(d, "enabled", True)
+                                    L.info(f"Set device '{d.name}' to category {answers['category']}")
+
                         existingDevices = config.get("omron", {}).get("devices", [])
                         existingMacs = {d["macaddr"] for d in existingDevices}
 
@@ -2846,9 +2865,9 @@ def init_cmd(
                             click.echo()
 
                             choices = []
-                            for i, d in enumerate(allDevices):
-                                isExisting = d["macaddr"] in existingMacs
-                                inApi = d["macaddr"] in apiMacs
+                            for i, device_dict in enumerate(allDevices):
+                                isExisting = device_dict["macaddr"] in existingMacs
+                                inApi = device_dict["macaddr"] in apiMacs
 
                                 prefix = "+ "
                                 if not inApi:
@@ -2857,7 +2876,7 @@ def init_cmd(
                                 elif isExisting:
                                     prefix = "= "
 
-                                label = f"{prefix}{d['name']} ({d['category']}) - {d['macaddr']}"
+                                label = f"{prefix}{device_dict['name']} ({device_dict['category']}) - {device_dict['macaddr']}"
                                 choices.append((label, i))
 
                                 # API devices checked, old config-only devices unchecked
